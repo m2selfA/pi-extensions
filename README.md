@@ -88,6 +88,7 @@ These TypeSafe AI integrations are experimental and may change as they are evalu
 | [`pi-goal`](./packages/pi-goal) | Keep the agent working until a goal is verified complete; optionally enable an experimental ordered queue. | `pi install npm:@narumitw/pi-goal` |
 | [`pi-notes`](./packages/pi-notes) | Browse and edit global Markdown notes in an isolated embedded-agent workspace. | `pi install npm:@narumitw/pi-notes` |
 | [`pi-progress`](./packages/pi-progress) | Keep branch-aware multi-step work visible above the editor with the `update_progress` model tool. | `pi install npm:@narumitw/pi-progress` |
+| [`pi-retry`](./packages/pi-retry) | Classify transient provider failures and route retries through an explicit ordered model fallback chain. | `pi install npm:@narumitw/pi-retry` |
 | [`pi-worktree`](./packages/pi-worktree) | Create, switch, remove, and prune Git worktrees while carrying the Pi session into another workspace. | `pi install npm:@narumitw/pi-worktree` |
 
 Current Plan and Goal releases can coexist on the characterized Pi runtime through their anonymous cooperative workflow mutex.
@@ -267,7 +268,6 @@ The following packages remain available as source references but are excluded fr
 - `pi-codex-accounts` — replaced by [`pi-accounts`](./packages/pi-accounts)
 - `pi-codex-usage` — replaced by [`pi-usage`](./packages/pi-usage)
 - [`pi-cbmem`](./deprecated/pi-cbmem) — deprecated without a replacement because a simple benchmark found insufficient benefit and substantially higher token usage
-- `pi-retry` — replaced by Pi's built-in provider retry and timeout behavior
 - `pi-google-genai` — replaced by the `grounding-with-google-genai` agent skill
 - `pi-image-drop` — deprecated without a replacement
 - [`pi-workflow`](./deprecated/pi-workflow) — replaced by focused Plan and Goal products; atomic Plan-to-Goal handoff has [no replacement](./deprecated/pi-workflow/README.md#-migration-from-pi-workflow)

@@ -3,16 +3,13 @@
 [![npm](https://img.shields.io/npm/v/@narumitw/pi-retry)](https://www.npmjs.com/package/@narumitw/pi-retry) [![Pi extension](https://img.shields.io/badge/Pi-extension-blue)](https://pi.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
 > [!WARNING]
-> `@narumitw/pi-retry` is deprecated, kept under `deprecated/` for reference, and no longer
-> part of the active workspace package set. Current Pi releases provide built-in provider retry,
-> Codex websocket renewal, and configurable HTTP/provider/websocket idle timeouts. Remove it with:
+> This directory contains the archived predecessor implementation. The maintained package is now
+> [`packages/pi-retry`](../../packages/pi-retry), which keeps Pi's native retry path and adds
+> explicit fallback routing. Do not install this archived checkout as the current package.
 >
 > ```bash
-> pi uninstall npm:@narumitw/pi-retry
+> pi install npm:@narumitw/pi-retry
 > ```
->
-> Use Pi's built-in `retry` and `httpIdleTimeoutMs` settings instead. In particular, removing this
-> extension also removes its more aggressive 90-second stall watchdog.
 
 `@narumitw/pi-retry` is a native [Pi coding agent](https://pi.dev) extension that treats provider responses containing `Unknown error (no error details in response)`, Codex backend errors that explicitly say the request can be retried, Codex `websocket_connection_limit_reached`, and stalled provider streams as retryable.
 
@@ -34,23 +31,18 @@ Use it to make Pi sessions more resilient when an upstream AI provider returns a
 - Supports `--retry-stall-timeout-ms <ms>` and `PI_RETRY_STALL_TIMEOUT_MS=<ms>`.
 - Works as a small, focused npm Pi extension package.
 
-## 📦 Install
+## 📦 Historical source
+
+This directory is retained only to document the predecessor implementation. Do not install it as
+`npm:@narumitw/pi-retry`; use the maintained package instead:
 
 ```bash
 pi install npm:@narumitw/pi-retry
+pi -e ./packages/pi-retry
 ```
 
-Try without installing permanently:
-
-```bash
-pi -e npm:@narumitw/pi-retry
-```
-
-Try this package locally from the repository root:
-
-```bash
-pi -e ./deprecated/pi-retry
-```
+The archived implementation below still describes its old watchdog behavior and is not the current
+package contract.
 
 Pi's agent-level retry policy must be enabled (the default):
 
