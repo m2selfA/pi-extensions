@@ -477,7 +477,7 @@ test("restored active goal applies budget limits before unavailable-tool pauses"
   }
 });
 
-test("stable Goal tools respect a restrictive policy when starting a goal", async () => {
+test("explicit Goal activation adds only Goal helpers to a restrictive policy", async () => {
   const mock = createMockPi();
   registerGoal(mock.pi);
   const context = createMockContext();
@@ -486,15 +486,35 @@ test("stable Goal tools respect a restrictive policy when starting a goal", asyn
 
   await mock.commands.get("goal")?.handler("finish the work", context.ctx);
 
-  assert.equal(lastGoalStatus(mock), null);
-  assert.equal(mock.sentUserMessages.length, 0);
-  assert.deepEqual(mock.rawPi.getActiveTools(), ["read", "bash"]);
-  assert.match(context.notifications.at(-1)?.message ?? "", /Cannot start \/goal/i);
+  assert.equal(lastGoalStatus(mock), "active");
+  assert.equal(mock.sentUserMessages.length, 1);
+  assert.deepEqual(mock.rawPi.getActiveTools(), ["read", "bash", "goal_complete", "goal_blocked", "goal_wait"]);
+  assert.equal(
+    context.notifications.some((notice) => /Cannot start \/goal/i.test(notice.message)),
+    false,
+  );
 });
 
+test("releasing Goal restores the prior restrictive allowlist", async () => {
+  const mock = createMockPi();
+  registerGoal(mock.pi);
+  const context = createMockContext();
+  mock.events.get("session_start")?.[0]?.({}, context.ctx);
+  mock.rawPi.setActiveTools(["read", "bash"]);
+
+  await mock.commands.get("goal")?.handler("finish the work", context.ctx);
+  assert.deepEqual(mock.rawPi.getActiveTools(), ["read", "bash", "goal_complete", "goal_blocked", "goal_wait"]);
+
+  await mock.commands.get("goal")?.handler("pause", context.ctx);
+  assert.deepEqual(mock.rawPi.getActiveTools(), ["read", "bash"]);
+});
 test("failed replacement activation pauses an existing active goal without terminal tools", async () => {
   const existing = await startGoalForTest();
   existing.mock.rawPi.setActiveTools(["read", "bash"]);
+  const originalSetActiveTools = existing.mock.rawPi.setActiveTools.bind(existing.mock.rawPi);
+  existing.mock.rawPi.setActiveTools = (names) => {
+    originalSetActiveTools(names.filter((name) => name !== "goal_blocked"));
+  };
 
   await existing.mock.commands.get("goal")?.handler("replacement objective", existing.ctx);
 
@@ -505,7 +525,7 @@ test("failed replacement activation pauses an existing active goal without termi
   assert.match(existing.notifications.at(-1)?.message ?? "", /goal tools.*paused/i);
 });
 
-test("start fails without committing a goal when a required tool is inactive", async () => {
+test("explicit Goal activation completes a partially filtered helper set", async () => {
   const mock = createMockPi({ activeTools: ["read", "bash"] });
   registerGoal(mock.pi);
   const context = createMockContext();
@@ -519,11 +539,10 @@ test("start fails without committing a goal when a required tool is inactive", a
   };
 
   await mock.commands.get("goal")?.handler("finish the work", context.ctx);
-  assert.equal(lastGoalStatus(mock), null);
-  assert.equal(mock.sentUserMessages.length, 0);
-  assert.match(context.notifications.at(-1)?.message ?? "", /Cannot start \/goal/i);
-  assert.equal(activeToolWrites, 0);
-  assert.deepEqual(mock.rawPi.getActiveTools(), ["read", "bash", "goal_complete"]);
+  assert.equal(lastGoalStatus(mock), "active");
+  assert.equal(mock.sentUserMessages.length, 1);
+  assert.equal(activeToolWrites, 1);
+  assert.deepEqual(mock.rawPi.getActiveTools(), ["read", "bash", "goal_complete", "goal_blocked", "goal_wait"]);
 });
 
 test("failed first prompt delivery preserves the stable tool set", async () => {

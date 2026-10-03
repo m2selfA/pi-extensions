@@ -103,7 +103,7 @@ If restoration is busy, the Goal moves only to its existing paused safe state.
 It does not change active tools or schedule work, and you can resume it after the other workflow ends.
 Restored stopped Goals and inert legacy queues do not acquire or schedule automatic work.
 
-An active Goal still pauses if a non-participating restrictive policy later removes its required terminal tools.
+An explicit `/goal` start, resume, or active edit adds only pi-goal's missing helper tools (`goal_complete`, `goal_blocked`, and `goal_wait`) to the current allowlist. It leaves unrelated active tools unchanged. If a non-participating restrictive policy later removes the required terminal tools while a Goal is running, pi-goal pauses the Goal instead of overriding that policy.
 
 The coexistence guarantee is cooperative and applies only when every contender implements v1 on the characterized Pi runtime and shares its event bus and session-manager identity.
 A pre-v1, mixed-version, non-participating, forked, or otherwise uncharacterized counterpart remains unsupported for mutual exclusion.

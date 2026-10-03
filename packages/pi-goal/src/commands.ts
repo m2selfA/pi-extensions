@@ -71,14 +71,14 @@ export class GoalCommandController {
       }
     }
 
-    // Tool registration keeps the Goal schema stable. A missing tool means another
-    // policy or allowlist intentionally removed it, so activation must not widen it.
+    // Goal activation may restore only Goal's own helper tools after a restrictive
+    // allowlist removed them; unrelated tools remain untouched.
     if (isRequestCurrent && !isRequestCurrent()) return;
     const retainedOwner = this.runtime.ownsWorkflow(existingGoal);
     if (!this.runtime.acquireWorkflow(ctx.sessionManager)) return this.reportWorkflowBusy(ctx);
     const acquiredForRequest = !retainedOwner;
     try {
-      this.runtime.assertGoalToolsAvailable();
+      this.runtime.activateGoalTools();
     } catch (error) {
       notifyTerminal(ctx.ui, `Cannot start /goal: ${formatError(error)}`, "error");
       if (existingGoal?.status === "active") this.runtime.pauseGoalForUnavailableTools(ctx);
@@ -229,7 +229,7 @@ export class GoalCommandController {
       return;
     }
     try {
-      this.runtime.assertGoalToolsAvailable();
+      this.runtime.activateGoalTools();
     } catch (error) {
       notifyTerminal(ctx.ui, `Cannot resume /goal: ${formatError(error)}`, "error");
       this.runtime.releaseWorkflow();
@@ -291,7 +291,7 @@ export class GoalCommandController {
       return;
     }
     try {
-      this.runtime.assertGoalToolsAvailable();
+      this.runtime.activateGoalTools();
     } catch (error) {
       notifyTerminal(ctx.ui, `Cannot resume /goal: ${formatError(error)}`, "error");
       return;
@@ -373,7 +373,7 @@ export class GoalCommandController {
     const acquiredForEdit = intendsActive && !retainedOwner;
     if (intendsActive) {
       try {
-        this.runtime.assertGoalToolsAvailable();
+        this.runtime.activateGoalTools();
       } catch (error) {
         notifyTerminal(ctx.ui, `Cannot reactivate /goal: ${formatError(error)}`, "error");
         if (currentGoal.status === "active") this.runtime.pauseGoalForUnavailableTools(ctx);

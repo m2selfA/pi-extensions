@@ -212,6 +212,7 @@ test("legacy cleanup uses Pi agent directory tilde expansion", () => {
       env: {
         ...process.env,
         HOME: home,
+        USERPROFILE: home,
         PI_CODING_AGENT_DIR: "~/custom-agent",
       },
       encoding: "utf8",

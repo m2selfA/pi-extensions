@@ -429,18 +429,23 @@ test("failed resume delivery restores the stopped state and original goal_id", a
   );
 });
 
-test("resume stays stopped when another policy hides terminal tools", async () => {
+test("resume reactivates Goal helpers after a restrictive policy removes them", async () => {
   const restored = restoreGoalForTest("paused");
   const originalId = restored.sessionGoal.id;
-  const originalSetActiveTools = restored.mock.rawPi.setActiveTools.bind(restored.mock.rawPi);
-  originalSetActiveTools(["read", "bash"]);
+  restored.mock.rawPi.setActiveTools(["read", "bash"]);
 
   await restored.mock.commands.get("goal")?.handler("resume", restored.ctx);
 
-  assert.equal(lastGoalStatus(restored.mock), "paused");
-  assert.equal(requireLastGoal(restored.mock).id, originalId);
-  assert.equal(restored.mock.sentUserMessages.length, 0);
-  assert.match(restored.notifications.at(-1)?.message ?? "", /Cannot resume \/goal/i);
+  assert.equal(lastGoalStatus(restored.mock), "active");
+  assert.equal(requireLastGoal(restored.mock).id !== originalId, true);
+  assert.equal(restored.mock.sentUserMessages.length, 1);
+  assert.deepEqual(restored.mock.rawPi.getActiveTools(), [
+    "read",
+    "bash",
+    "goal_complete",
+    "goal_blocked",
+    "goal_wait",
+  ]);
 });
 
 test("resume succeeds after the restrictive policy restores terminal tools", async () => {
@@ -461,17 +466,17 @@ test("resume succeeds after the restrictive policy restores terminal tools", asy
   ]);
 });
 
-test("active edit pauses when another policy hides terminal tools", async () => {
+test("active edit reactivates Goal helpers after a restrictive policy removes them", async () => {
   const edited = await startGoalForTest();
   edited.mock.rawPi.setActiveTools(["read", "bash"]);
 
   await edited.mock.commands.get("goal")?.handler("edit changed objective", edited.ctx);
 
-  const restored = requireLastGoal(edited.mock);
-  assert.equal(restored.status, "paused");
-  assert.equal(restored.text, "finish");
-  assert.equal(edited.mock.sentUserMessages.length, 1);
-  assert.match(edited.notifications.at(-1)?.message ?? "", /goal tools.*paused/i);
+  const updated = requireLastGoal(edited.mock);
+  assert.equal(updated.status, "active");
+  assert.equal(updated.text, "changed objective");
+  assert.equal(edited.mock.sentUserMessages.length, 2);
+  assert.deepEqual(edited.mock.rawPi.getActiveTools(), ["read", "bash", "goal_complete", "goal_blocked", "goal_wait"]);
 });
 
 test("failed start delivery clears a new goal and restores a replaced stopped goal", async () => {

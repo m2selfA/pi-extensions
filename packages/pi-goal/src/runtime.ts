@@ -23,7 +23,12 @@ import { nextToolFreeRepeatState, resetGoalSafetyEpoch } from "./safety.js";
 export { queueGoalSafetyReset, resetGoalSafetyEpoch } from "./safety.js";
 
 import { DEFAULT_GOAL_SETTINGS, type GoalSettings, type GoalSettingsLoadIssue } from "./settings.js";
-import { assertGoalToolsAvailable, goalToolsAvailable } from "./tool-policy.js";
+import {
+  activateGoalTools as activateGoalToolsForPolicy,
+  assertGoalToolsAvailable,
+  GOAL_TOOL_NAMES,
+  goalToolsAvailable,
+} from "./tool-policy.js";
 import { type GoalWait, GoalWaitTimer } from "./wait.js";
 import { WorkflowMutex, type WorkflowMutexOwner } from "./workflow-mutex.js";
 
@@ -232,6 +237,7 @@ export class GoalRuntime {
   cancelledContinuationMarkers = new Map<string, string>();
   claimedContinuationMarkers = new Map<string, string>();
   pendingNonGoalInputs: PendingNonGoalInput[] = [];
+  private goalToolLease?: { added: string[] };
   menuGeneration = 0;
   menuController = new AbortController();
 
@@ -248,6 +254,42 @@ export class GoalRuntime {
 
   assertGoalToolsAvailable() {
     assertGoalToolsAvailable(this.pi);
+  }
+
+  activateGoalTools() {
+    const before = this.pi.getActiveTools();
+    try {
+      activateGoalToolsForPolicy(this.pi);
+    } catch (error) {
+      this.restoreGoalToolsFrom(before);
+      throw error;
+    }
+
+    const beforeNames = new Set(before);
+    const added = GOAL_TOOL_NAMES.filter((name) => !beforeNames.has(name) && this.pi.getActiveTools().includes(name));
+    if (added.length > 0) {
+      this.goalToolLease = {
+        added: [...new Set([...(this.goalToolLease?.added ?? []), ...added])],
+      };
+    }
+  }
+
+  private restoreGoalToolsFrom(before: readonly string[]) {
+    const beforeNames = new Set(before);
+    const current = this.pi.getActiveTools();
+    const next = current.filter(
+      (name) => beforeNames.has(name) || !GOAL_TOOL_NAMES.includes(name as (typeof GOAL_TOOL_NAMES)[number]),
+    );
+    if (next.length !== current.length) this.pi.setActiveTools(next);
+  }
+
+  private releaseGoalTools() {
+    const added = new Set(this.goalToolLease?.added ?? []);
+    this.goalToolLease = undefined;
+    if (added.size === 0) return;
+    const current = this.pi.getActiveTools();
+    const next = current.filter((name) => !added.has(name));
+    if (next.length !== current.length) this.pi.setActiveTools(next);
   }
 
   bindWorkflowSession(session: object) {
@@ -281,7 +323,10 @@ export class GoalRuntime {
   releaseWorkflow() {
     const owner = this.workflowOwner;
     this.workflowMutex.release(owner);
-    if (!this.workflowMutex.isOwner(owner)) this.workflowOwner = undefined;
+    if (!this.workflowMutex.isOwner(owner)) {
+      this.workflowOwner = undefined;
+      this.releaseGoalTools();
+    }
   }
 
   hasLegacyQueueInterface() {

@@ -43,7 +43,7 @@ Escape returns to the previous screen without reverting changes that were alread
 
 Pi-goal registers `goal_complete`, `goal_blocked`, and `goal_wait` once and keeps their schemas stable from startup.
 Visible Goal tools do not mean Goal mode is active, and only the latest effective active Goal contract authorizes their use.
-Pi-goal never widens a restrictive active-tool policy; activation rejects when required terminal tools are missing, and an active Goal pauses if they later disappear.
+An explicit `/goal` start, resume, or active edit reactivates only pi-goal's own helper tools when a restrictive allowlist removed them; unrelated tools remain unchanged. Restored goals do not widen the session tool set automatically, and an active Goal still pauses if another policy later removes its required terminal tools.
 The retired `toolVisibility` key is ignored and preserved as unknown data when another setting is saved.
 
 `experimental.goals` is a removed legacy setting.
@@ -83,9 +83,7 @@ Invalid or malformed existing settings are never overwritten; they produce a war
 In the TUI, Goal Settings becomes a read-only summary that identifies the invalid file and tells you to fix it and run `/reload`.
 
 Plan mode or another restrictive policy may hide Goal tools.
-Pi-goal does not override that policy during restore or later turns.
-Activation fails when required terminal tools are unavailable, and an active goal pauses without automatic continuation if they disappear.
-A restrictive allowlist created before `goal_wait` existed can still run ordinary Goals with `goal_complete` and `goal_blocked`.
-The model cannot enter external waiting until that allowlist also includes `goal_wait`.
+An explicit `/goal` start, resume, or active edit reactivates only the registered Goal helper tools it needs; unrelated tools remain unchanged. Restore does not widen the session tool set, and a later non-participating policy removal still pauses an active Goal instead of being overridden.
+If Pi ignores a required helper because it is hidden or unavailable, activation fails with a diagnostic. A restrictive allowlist created before `goal_wait` existed can still run ordinary Goals with `goal_complete` and `goal_blocked`, but external waiting remains unavailable until `goal_wait` can be activated.
 The pause aborts a Goal-owned kickoff, resume, active edit, or automatic-continuation prompt.
 It does not cancel or stale-block unrelated user or extension turns, including startup follow-ups after a restrictive restore.

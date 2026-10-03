@@ -11,6 +11,32 @@ export function goalToolsAvailable(pi: Pick<ExtensionAPI, "getActiveTools">) {
   return REQUIRED_GOAL_TOOL_NAMES.every((name) => active.has(name));
 }
 
+/**
+ * Explicit Goal activation may restore only Goal's own helper tools after a
+ * restrictive allowlist removed them. Other tools remain untouched.
+ */
+export function activateGoalTools(pi: Pick<ExtensionAPI, "getActiveTools" | "setActiveTools">) {
+  const active = pi.getActiveTools();
+  const activeNames = new Set(active);
+  const missing = GOAL_TOOL_NAMES.filter((name) => !activeNames.has(name));
+  if (missing.length === 0) {
+    assertGoalToolsAvailable(pi);
+    return;
+  }
+
+  pi.setActiveTools([...active, ...missing]);
+  try {
+    assertGoalToolsAvailable(pi);
+  } catch (error) {
+    const current = pi.getActiveTools();
+    const next = current.filter(
+      (name) => activeNames.has(name) || !GOAL_TOOL_NAMES.includes(name as (typeof GOAL_TOOL_NAMES)[number]),
+    );
+    if (next.length !== current.length) pi.setActiveTools(next);
+    throw error;
+  }
+}
+
 export function assertGoalToolsAvailable(pi: Pick<ExtensionAPI, "getActiveTools">) {
   if (goalToolsAvailable(pi)) return;
   throw new Error(
