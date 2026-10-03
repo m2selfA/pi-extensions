@@ -46,13 +46,18 @@ Create `<getAgentDir()>/pi-retry.json` (normally `~/.pi/agent/pi-retry.json`):
 {
   "autoRoute": true,
   "fallbackModels": [
-    "openrouter/anthropic/claude-sonnet-4-5",
-    "anthropic/claude-sonnet-4-5"
+    {
+      "model": "openrouter/anthropic/claude-sonnet-4-5",
+      "thinkingLevel": "medium"
+    },
+    {
+      "model": "anthropic/claude-sonnet-4-5"
+    }
   ]
 }
 ```
 
-Start Pi with your normal primary model. With `autoRoute: true`, pi-retry wraps that selected physical model as the primary and uses the listed models only after a classified transient failure reaches Pi's retry path:
+Start Pi with your normal primary model. With `autoRoute: true`, pi-retry wraps that selected physical model as the primary and uses the listed models only after a classified transient failure reaches Pi's retry path. String entries remain supported for fallback models without a per-model thinking override:
 
 ```bash
 pi -e npm:@narumitw/pi-retry --model openai-codex/gpt-5.4
@@ -72,6 +77,10 @@ The fallback model must already be available and authenticated in Pi. Keep Pi's 
 ## 🧭 How it works
 
 Pi first finishes the provider request and classifies the assistant response. A transient result is annotated with a retryable provider marker, allowing Pi's own retry loop to remove the failed response and call `agent.continue()`. When the selected model is `pi-retry/auto`, its route receives the failed physical model and chooses the next configured, authenticated candidate. Successful tool follow-ups stay on the fallback until the next user turn.
+
+When switching after a transient failure, pi-retry first scans the configured chain for candidates with the same model ID as the failed physical model, preserving their configured order. Only when no usable same-ID candidate remains does it scan different model IDs in chain order. Unavailable or unauthenticated candidates are skipped without consuming a fallback slot.
+
+A fallback entry's explicit `thinkingLevel` wins. Without one, pi-retry uses Pi's configured `defaultThinkingLevel` when present; if Pi has no configured default, it inherits the failed request's thinking level. Pi clamps the returned level to the selected model's capabilities. This level remains sticky for tool continuations on that fallback.
 
 No fallback is attempted for user cancellation, authentication or permission failures, malformed requests, context overflow, billing, or quota errors. If every fallback has failed, Pi's normal retry budget continues to govern whether the current model is retried again or the turn ends.
 
@@ -98,7 +107,7 @@ Supported fields:
 | `enabled` | `true` | Enable provider classification and fallback routing. |
 | `autoRoute` | `false` | Wrap the physical model selected at session start when at least one fallback is configured. |
 | `primaryModel` | unset | Physical `provider/model` used when `pi-retry/auto` is selected directly. |
-| `fallbackModels` | `[]` | Ordered physical `provider/model` candidates. At most 16 unique references are accepted. |
+| `fallbackModels` | `[]` | Ordered physical model candidates. Each entry is either a `provider/model` string or `{ "model": "provider/model", "thinkingLevel": "off"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max" }`; at most 16 unique references are accepted. |
 
 For fully explicit selection, set a primary model and select the virtual model:
 
@@ -106,7 +115,10 @@ For fully explicit selection, set a primary model and select the virtual model:
 {
   "primaryModel": "openai-codex/gpt-5.4",
   "fallbackModels": [
-    "openrouter/anthropic/claude-sonnet-4-5",
+    {
+      "model": "openrouter/anthropic/claude-sonnet-4-5",
+      "thinkingLevel": "high"
+    },
     "anthropic/claude-sonnet-4-5"
   ]
 }

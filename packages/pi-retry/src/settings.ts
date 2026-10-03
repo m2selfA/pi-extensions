@@ -7,12 +7,20 @@ export const RETRY_VIRTUAL_PROVIDER = "pi-retry";
 export const RETRY_VIRTUAL_MODEL = "auto";
 export const MAX_MODEL_REFS = 16;
 export const MAX_MODEL_REF_LENGTH = 512;
+export const RETRY_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+export type RetryThinkingLevel = (typeof RETRY_THINKING_LEVELS)[number];
+
+export type RetryFallbackModel = {
+  model: string;
+  thinkingLevel?: RetryThinkingLevel;
+};
 
 export type RetrySettings = {
   enabled: boolean;
   autoRoute: boolean;
   primaryModel?: string;
-  fallbackModels: string[];
+  fallbackModels: RetryFallbackModel[];
 };
 
 export type RetrySettingsState = {
@@ -129,16 +137,37 @@ function parsePartialRetrySettings(value: unknown): PartialRetrySettings | undef
   }
   if (Object.hasOwn(value, "fallbackModels")) {
     if (!Array.isArray(value.fallbackModels) || value.fallbackModels.length > MAX_MODEL_REFS) return undefined;
-    const fallbackModels: string[] = [];
+    const fallbackModels: RetryFallbackModel[] = [];
     for (const entry of value.fallbackModels) {
-      const model = parseModelRef(entry);
-      if (!model) return undefined;
-      if (!fallbackModels.includes(model)) fallbackModels.push(model);
+      const fallback = parseFallbackModel(entry);
+      if (!fallback) return undefined;
+      if (!fallbackModels.some((candidate) => candidate.model === fallback.model)) fallbackModels.push(fallback);
     }
     result.fallbackModels = fallbackModels;
   }
 
   return result;
+}
+
+function parseFallbackModel(value: unknown): RetryFallbackModel | undefined {
+  if (typeof value === "string") {
+    const model = parseModelRef(value);
+    return model ? { model } : undefined;
+  }
+  if (!isRecord(value)) return undefined;
+
+  const model = parseModelRef(value.model);
+  if (!model) return undefined;
+  if (!Object.hasOwn(value, "thinkingLevel")) return { model };
+
+  const thinkingLevel = parseThinkingLevel(value.thinkingLevel);
+  return thinkingLevel ? { model, thinkingLevel } : undefined;
+}
+
+function parseThinkingLevel(value: unknown): RetryThinkingLevel | undefined {
+  return typeof value === "string" && (RETRY_THINKING_LEVELS as readonly string[]).includes(value)
+    ? (value as RetryThinkingLevel)
+    : undefined;
 }
 
 function readSettingsDocument(

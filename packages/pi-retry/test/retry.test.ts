@@ -11,7 +11,7 @@ import {
   RETRYABLE_ERROR_TAG,
 } from "../src/classifier.js";
 import retry from "../src/retry.js";
-import { createRetryRoute } from "../src/router.js";
+import { createRetryRoute, registerRetryVirtualModel } from "../src/router.js";
 import {
   loadRetrySettings,
   normalizeRetrySettings,
@@ -63,7 +63,7 @@ describe("retry settings", () => {
         settings: {
           enabled: true,
           autoRoute: true,
-          fallbackModels: ["openrouter/anthropic/claude-sonnet-4-5"],
+          fallbackModels: [{ model: "openrouter/anthropic/claude-sonnet-4-5" }],
         },
       });
     } finally {
@@ -95,7 +95,31 @@ describe("retry settings", () => {
   test("rejects invalid settings shapes", () => {
     expect(normalizeRetrySettings({ enabled: "yes" })).toBeUndefined();
     expect(normalizeRetrySettings({ fallbackModels: ["openai/model", " "] })).toBeUndefined();
+    expect(
+      normalizeRetrySettings({ fallbackModels: [{ model: "openai/model", thinkingLevel: "extreme" }] }),
+    ).toBeUndefined();
     expect(normalizeRetrySettings({ fallbackModels: Array.from({ length: 17 }, (_, i) => `p/${i}`) })).toBeUndefined();
+    expect(
+      normalizeRetrySettings({
+        fallbackModels: [
+          "openrouter/anthropic/claude-sonnet-4-5",
+          { model: "anthropic/claude-sonnet-4-5", thinkingLevel: "high" },
+        ],
+      }),
+    ).toMatchObject({
+      fallbackModels: [
+        { model: "openrouter/anthropic/claude-sonnet-4-5" },
+        { model: "anthropic/claude-sonnet-4-5", thinkingLevel: "high" },
+      ],
+    });
+    expect(
+      normalizeRetrySettings({
+        fallbackModels: [
+          "anthropic/claude-sonnet-4-5",
+          { model: "anthropic/claude-sonnet-4-5", thinkingLevel: "high" },
+        ],
+      }),
+    ).toMatchObject({ fallbackModels: [{ model: "anthropic/claude-sonnet-4-5" }] });
   });
 });
 
@@ -165,6 +189,9 @@ describe("fallback routing", () => {
           return models;
         },
       },
+      getSettings() {
+        return {};
+      },
     } as unknown as ExtensionContext;
     const autoPrimaries = new WeakMap<object, string>();
     autoPrimaries.set(sessionManager, "openai/primary");
@@ -173,7 +200,7 @@ describe("fallback routing", () => {
       () => ({
         enabled: true,
         autoRoute: true,
-        fallbackModels: ["openrouter/anthropic/fallback", "anthropic/backup"],
+        fallbackModels: [{ model: "openrouter/anthropic/fallback" }, { model: "anthropic/backup" }],
       }),
       autoPrimaries,
       (_ctx, from, to) => notices.push(`${from}->${to}`),
@@ -251,6 +278,221 @@ describe("fallback routing", () => {
     expect(notices).toHaveLength(2);
   });
 
+  test("prefers same-name fallbacks before other names and uses Pi default thinking", () => {
+    const sessionManager = {};
+    const models = [model("openai", "gpt"), model("same", "gpt"), model("other", "model")];
+    const ctx = {
+      sessionManager,
+      modelRegistry: {
+        find(provider: string, id: string) {
+          return models.find((candidate) => candidate.provider === provider && candidate.id === id);
+        },
+        getAvailable() {
+          return models;
+        },
+      },
+      getSettings() {
+        return { defaultThinkingLevel: "low" };
+      },
+    } as unknown as ExtensionContext;
+    const autoPrimaries = new WeakMap<object, string>();
+    autoPrimaries.set(sessionManager, "openai/gpt");
+    const route = createRetryRoute(
+      () => ({
+        enabled: true,
+        autoRoute: true,
+        fallbackModels: [{ model: "other/model", thinkingLevel: "high" }, { model: "same/gpt" }],
+      }),
+      autoPrimaries,
+      undefined,
+      () => "low",
+    );
+    const virtual = model(RETRY_VIRTUAL_PROVIDER, RETRY_VIRTUAL_MODEL, "pi-virtual");
+    const first = route({ model: virtual, reason: "user", thinkingLevel: "medium", messages: [] } as never, ctx);
+    const second = route(
+      {
+        model: virtual,
+        reason: "retry",
+        thinkingLevel: "medium",
+        messages: [],
+        state: first.state,
+        failed: {
+          model: first.model,
+          thinkingLevel: "medium",
+          message: { role: "assistant", stopReason: "error", errorMessage: "HTTP 503 Service Unavailable" },
+        },
+      } as never,
+      ctx,
+    );
+    expect(modelReferenceForTest(second.model)).toBe("same/gpt");
+    expect(second.thinkingLevel).toBe("low");
+
+    const continuation = route(
+      {
+        model: virtual,
+        reason: "continuation",
+        thinkingLevel: "medium",
+        messages: [],
+        state: second.state,
+        previous: { model: second.model, thinkingLevel: "low" },
+      } as never,
+      ctx,
+    );
+    expect(modelReferenceForTest(continuation.model)).toBe("same/gpt");
+    expect(continuation.thinkingLevel).toBe("low");
+
+    const third = route(
+      {
+        model: virtual,
+        reason: "retry",
+        thinkingLevel: "medium",
+        messages: [],
+        state: continuation.state,
+        failed: {
+          model: continuation.model,
+          thinkingLevel: "low",
+          message: { role: "assistant", stopReason: "error", errorMessage: "HTTP 503 Service Unavailable" },
+        },
+      } as never,
+      ctx,
+    );
+    expect(modelReferenceForTest(third.model)).toBe("other/model");
+    expect(third.thinkingLevel).toBe("high");
+  });
+
+  test("uses Pi default thinking from the registered virtual model route", () => {
+    const sessionManager = {};
+    const models = [model("openai", "primary"), model("anthropic", "fallback")];
+    const autoPrimaries = new WeakMap<object, string>();
+    autoPrimaries.set(sessionManager, "openai/primary");
+    let definition:
+      | { route: (request: unknown, ctx: ExtensionContext) => { model: TestModel; thinkingLevel: string } }
+      | undefined;
+    const pi = {
+      getSettings() {
+        return { defaultThinkingLevel: "high" };
+      },
+      registerVirtualModel(value: unknown) {
+        definition = value as NonNullable<typeof definition>;
+      },
+    } as unknown as ExtensionAPI;
+    registerRetryVirtualModel(
+      pi,
+      () => ({ enabled: true, autoRoute: true, fallbackModels: [{ model: "anthropic/fallback" }] }),
+      autoPrimaries,
+    );
+    const ctx = {
+      sessionManager,
+      modelRegistry: {
+        find(provider: string, id: string) {
+          return models.find((candidate) => candidate.provider === provider && candidate.id === id);
+        },
+        getAvailable() {
+          return models;
+        },
+      },
+    } as unknown as ExtensionContext;
+    const result = definition?.route(
+      {
+        model: model(RETRY_VIRTUAL_PROVIDER, RETRY_VIRTUAL_MODEL, "pi-virtual"),
+        reason: "retry",
+        thinkingLevel: "medium",
+        messages: [],
+        state: { primary: "openai/primary", active: "openai/primary", tried: ["openai/primary"] },
+        failed: {
+          model: models[0],
+          thinkingLevel: "medium",
+          message: { role: "assistant", stopReason: "error", errorMessage: "HTTP 503 Service Unavailable" },
+        },
+      },
+      ctx,
+    );
+    expect(result?.thinkingLevel).toBe("high");
+  });
+
+  test("inherits the failed model thinking level when no override or Pi default exists", () => {
+    const sessionManager = {};
+    const models = [model("openai", "primary"), model("anthropic", "fallback")];
+    const ctx = {
+      sessionManager,
+      modelRegistry: {
+        find(provider: string, id: string) {
+          return models.find((candidate) => candidate.provider === provider && candidate.id === id);
+        },
+        getAvailable() {
+          return models;
+        },
+      },
+      getSettings() {
+        return {};
+      },
+    } as unknown as ExtensionContext;
+    const route = createRetryRoute(
+      () => ({ enabled: true, autoRoute: true, fallbackModels: [{ model: "anthropic/fallback" }] }),
+      new WeakMap(),
+    );
+    const result = route(
+      {
+        model: model(RETRY_VIRTUAL_PROVIDER, RETRY_VIRTUAL_MODEL, "pi-virtual"),
+        reason: "retry",
+        thinkingLevel: "medium",
+        messages: [],
+        state: { primary: "openai/primary", active: "openai/primary", tried: ["openai/primary"] },
+        failed: {
+          model: models[0],
+          thinkingLevel: "xhigh",
+          message: { role: "assistant", stopReason: "error", errorMessage: "HTTP 503 Service Unavailable" },
+        },
+      } as never,
+      ctx,
+    );
+    expect(modelReferenceForTest(result.model)).toBe("anthropic/fallback");
+    expect(result.thinkingLevel).toBe("xhigh");
+  });
+
+  test("skips unavailable candidates without consuming a fallback slot", () => {
+    const sessionManager = {};
+    const models = [model("openai", "primary"), model("anthropic", "usable")];
+    const ctx = {
+      sessionManager,
+      modelRegistry: {
+        find(provider: string, id: string) {
+          return models.find((candidate) => candidate.provider === provider && candidate.id === id);
+        },
+        getAvailable() {
+          return models;
+        },
+      },
+      getSettings() {
+        return {};
+      },
+    } as unknown as ExtensionContext;
+    const route = createRetryRoute(
+      () => ({
+        enabled: true,
+        autoRoute: true,
+        fallbackModels: [{ model: "same/primary" }, { model: "anthropic/usable" }],
+      }),
+      new WeakMap(),
+    );
+    const result = route(
+      {
+        model: model(RETRY_VIRTUAL_PROVIDER, RETRY_VIRTUAL_MODEL, "pi-virtual"),
+        reason: "retry",
+        thinkingLevel: "medium",
+        messages: [],
+        state: { primary: "openai/primary", active: "openai/primary", tried: ["openai/primary"] },
+        failed: {
+          model: models[0],
+          thinkingLevel: "medium",
+          message: { role: "assistant", stopReason: "error", errorMessage: "HTTP 503 Service Unavailable" },
+        },
+      } as never,
+      ctx,
+    );
+    expect(modelReferenceForTest(result.model)).toBe("anthropic/usable");
+  });
+
   test("does not switch when Pi retry is disabled", () => {
     const sessionManager = {};
     const primary = model("openai", "primary");
@@ -265,10 +507,13 @@ describe("fallback routing", () => {
           return [primary, fallback];
         },
       },
+      getSettings() {
+        return {};
+      },
     } as unknown as ExtensionContext;
     const notices: string[] = [];
     const route = createRetryRoute(
-      () => ({ enabled: false, autoRoute: true, fallbackModels: ["anthropic/fallback"] }),
+      () => ({ enabled: false, autoRoute: true, fallbackModels: [{ model: "anthropic/fallback" }] }),
       new WeakMap(),
       (_ctx, from, to) => notices.push(`${from}->${to}`),
     );
@@ -304,9 +549,12 @@ describe("fallback routing", () => {
           return [primary, fallback];
         },
       },
+      getSettings() {
+        return {};
+      },
     } as unknown as ExtensionContext;
     const route = createRetryRoute(
-      () => ({ enabled: true, autoRoute: false, fallbackModels: ["anthropic/fallback"] }),
+      () => ({ enabled: true, autoRoute: false, fallbackModels: [{ model: "anthropic/fallback" }] }),
       new WeakMap(),
     );
     const result = route(

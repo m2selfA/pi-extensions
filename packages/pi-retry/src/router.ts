@@ -1,10 +1,17 @@
 import type { ExtensionAPI, ExtensionContext, ModelRoute, ModelRouteRequest } from "@earendil-works/pi-coding-agent";
 import { type AssistantFailure, classifyAssistantFailure } from "./classifier.js";
-import { RETRY_VIRTUAL_MODEL, RETRY_VIRTUAL_PROVIDER, type RetrySettings } from "./settings.js";
+import {
+  RETRY_VIRTUAL_MODEL,
+  RETRY_VIRTUAL_PROVIDER,
+  type RetryFallbackModel,
+  type RetrySettings,
+  type RetryThinkingLevel,
+} from "./settings.js";
 
 export type RetryRouteState = {
   primary: string;
   active: string;
+  activeThinkingLevel?: RetryThinkingLevel;
   tried: string[];
 };
 
@@ -12,6 +19,7 @@ type RetryRouteContext = Pick<ExtensionContext, "sessionManager" | "modelRegistr
 type PhysicalModel = NonNullable<ExtensionContext["model"]>;
 type RetryRouteRequest = ModelRouteRequest<RetryRouteState>;
 type FallbackNotice = (ctx: ExtensionContext, from: string, to: string, reason: string) => void;
+type DefaultThinkingLevelReader = () => RetryThinkingLevel | undefined;
 
 export function modelReference(model: PhysicalModel): string {
   return `${model.provider}/${model.id}`;
@@ -21,6 +29,7 @@ export function createRetryRoute(
   getSettings: () => RetrySettings,
   autoPrimaries: WeakMap<object, string>,
   onFallback?: FallbackNotice,
+  getDefaultThinkingLevel: DefaultThinkingLevelReader = () => undefined,
 ): (request: RetryRouteRequest, ctx: ExtensionContext) => ModelRoute<RetryRouteState> {
   return (request, ctx) => {
     const settings = getSettings();
@@ -36,14 +45,15 @@ export function createRetryRoute(
       );
     }
 
-    const candidates = unique([primary, ...settings.fallbackModels]);
     const state = request.state;
     const failed = request.failed;
     if (request.reason === "retry" && failed) {
       const failedRef = modelReference(failed.model);
+      const failedThinkingLevel = failed.thinkingLevel ?? state?.activeThinkingLevel ?? request.thinkingLevel;
       const currentState: RetryRouteState = state ?? {
         primary,
         active: failedRef,
+        activeThinkingLevel: failedThinkingLevel,
         tried: [failedRef],
       };
       const failure = classifyAssistantFailure(failed.message as AssistantFailure);
@@ -51,21 +61,23 @@ export function createRetryRoute(
       const currentModel = resolvePhysicalModel(ctx, activeRef) ?? resolvePhysicalModel(ctx, failedRef);
 
       if (failure.kind === "transient" && settings.enabled) {
-        const failedIndex = Math.max(candidates.indexOf(failedRef), candidates.indexOf(activeRef));
-        const next = candidates
-          .slice(failedIndex >= 0 ? failedIndex + 1 : 0)
-          .find((candidate) => !currentState.tried.includes(candidate) && resolvePhysicalModel(ctx, candidate));
+        const next = orderFallbackModels(settings.fallbackModels, failed.model.id).find(
+          (candidate) =>
+            !currentState.tried.includes(candidate.model) && resolvePhysicalModel(ctx, candidate.model) !== undefined,
+        );
         if (next) {
-          const nextModel = resolvePhysicalModel(ctx, next);
+          const nextModel = resolvePhysicalModel(ctx, next.model);
           if (nextModel) {
-            onFallback?.(ctx, failedRef, next, failure.reason);
+            const nextThinkingLevel = resolveFallbackThinkingLevel(getDefaultThinkingLevel, next, failedThinkingLevel);
+            onFallback?.(ctx, failedRef, next.model, failure.reason);
             return {
               model: nextModel,
-              thinkingLevel: request.thinkingLevel,
+              thinkingLevel: nextThinkingLevel,
               state: {
                 primary: currentState.primary,
-                active: next,
-                tried: [...currentState.tried, next],
+                active: next.model,
+                activeThinkingLevel: nextThinkingLevel,
+                tried: [...currentState.tried, next.model],
               },
             };
           }
@@ -75,10 +87,11 @@ export function createRetryRoute(
       if (currentModel) {
         return {
           model: currentModel,
-          thinkingLevel: request.thinkingLevel,
+          thinkingLevel: currentState.activeThinkingLevel ?? failedThinkingLevel,
           state: {
             primary: currentState.primary,
             active: modelReference(currentModel),
+            activeThinkingLevel: currentState.activeThinkingLevel ?? failedThinkingLevel,
             tried: currentState.tried,
           },
         };
@@ -93,13 +106,18 @@ export function createRetryRoute(
     if (!model) {
       throw new Error(`pi-retry could not find an authenticated physical model for ${activeRef}.`);
     }
+    const thinkingLevel =
+      request.reason === "user"
+        ? request.thinkingLevel
+        : (state?.activeThinkingLevel ?? request.previous?.thinkingLevel ?? request.thinkingLevel);
 
     return {
       model,
-      thinkingLevel: request.thinkingLevel,
+      thinkingLevel,
       state: {
         primary,
         active: modelReference(model),
+        activeThinkingLevel: thinkingLevel,
         tried: request.reason === "user" ? [modelReference(model)] : (state?.tried ?? [modelReference(model)]),
       },
     };
@@ -112,7 +130,7 @@ export function registerRetryVirtualModel(
   autoPrimaries: WeakMap<object, string>,
   onFallback?: FallbackNotice,
 ): void {
-  const route = createRetryRoute(getSettings, autoPrimaries, onFallback);
+  const route = createRetryRoute(getSettings, autoPrimaries, onFallback, () => pi.getSettings().defaultThinkingLevel);
   pi.registerVirtualModel<RetryRouteState>({
     provider: RETRY_VIRTUAL_PROVIDER,
     id: RETRY_VIRTUAL_MODEL,
@@ -133,6 +151,28 @@ function resolvePhysicalModel(ctx: RetryRouteContext, reference: string): Physic
     : undefined;
 }
 
-function unique(values: readonly string[]): string[] {
-  return values.filter((value, index) => values.indexOf(value) === index);
+function orderFallbackModels(
+  fallbackModels: readonly RetryFallbackModel[],
+  failedModelId: string,
+): RetryFallbackModel[] {
+  const sameName: RetryFallbackModel[] = [];
+  const otherName: RetryFallbackModel[] = [];
+  for (const candidate of fallbackModels) {
+    if (modelIdFromReference(candidate.model) === failedModelId) sameName.push(candidate);
+    else otherName.push(candidate);
+  }
+  return [...sameName, ...otherName];
+}
+
+function resolveFallbackThinkingLevel(
+  getDefaultThinkingLevel: DefaultThinkingLevelReader,
+  candidate: RetryFallbackModel,
+  failedThinkingLevel: RetryThinkingLevel,
+): RetryThinkingLevel {
+  return candidate.thinkingLevel ?? getDefaultThinkingLevel() ?? failedThinkingLevel;
+}
+
+function modelIdFromReference(reference: string): string | undefined {
+  const separator = reference.indexOf("/");
+  return separator <= 0 || separator === reference.length - 1 ? undefined : reference.slice(separator + 1);
 }
