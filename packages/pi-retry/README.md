@@ -2,19 +2,20 @@
 
 [![npm](https://img.shields.io/npm/v/@narumitw/pi-retry)](https://www.npmjs.com/package/@narumitw/pi-retry) [![Pi extension](https://img.shields.io/badge/Pi-extension-blue)](https://pi.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
-`@narumitw/pi-retry` classifies transient provider failures so Pi can use its native retry loop, and can route a failed request through an explicitly configured, ordered fallback model chain.
+`@narumitw/pi-retry` classifies transient provider failures so Pi can use its native retry loop, routes failed requests through an explicitly configured, ordered fallback model chain, and recognizes explicit provider usage caps that should switch immediately.
 
 The extension does not call `ctx.abort()` for provider stalls. Pi's provider timeout and retry settings remain the cancellation and backoff authority, so a provider-originated abort is not confused with a user pressing Escape or Ctrl+C.
 
 ## ✨ Features
 
 - Recognizes transient transport, timeout, overload, rate-limit, gateway, Codex websocket, and empty-detail provider failures.
+- Detects structured provider usage caps, surfaces an available reset timestamp, and immediately switches a virtual route to the next authenticated fallback.
 - Converts provider-originated `stopReason: "aborted"` responses to retryable errors only when the current request signal was not already aborted.
-- Preserves user and host cancellation, authentication failures, invalid requests, context overflow, billing, and quota failures as terminal conditions.
+- Preserves user and host cancellation, authentication failures, invalid requests, context overflow, and generic billing/quota failures as terminal conditions.
 - Registers `pi-retry/auto`, a Pi virtual model that switches to the next authenticated fallback on a classified retry.
 - Optionally wraps the physical model selected at session start, so existing model selection remains the primary route.
 - Keeps fallback state sticky for tool continuations and resets it for the next user turn.
-- Leaves retry attempts, exponential backoff, provider timeouts, and the retry budget to Pi's built-in settings.
+- Leaves ordinary retry attempts, exponential backoff, provider timeouts, and the retry budget to Pi's built-in settings.
 
 ## 📦 Install
 
@@ -57,7 +58,7 @@ Create `<getAgentDir()>/pi-retry.json` (normally `~/.pi/agent/pi-retry.json`):
 }
 ```
 
-Start Pi with your normal primary model. With `autoRoute: true`, pi-retry wraps that selected physical model as the primary and uses the listed models only after a classified transient failure reaches Pi's retry path. String entries remain supported for fallback models without a per-model thinking override:
+Start Pi with your normal primary model. With `autoRoute: true`, pi-retry wraps that selected physical model as the primary and uses the listed models after a classified transient failure reaches Pi's retry path or an explicit usage-limit response is detected. String entries remain supported for fallback models without a per-model thinking override:
 
 ```bash
 pi -e npm:@narumitw/pi-retry --model openai-codex/gpt-5.4
@@ -78,11 +79,13 @@ The fallback model must already be available and authenticated in Pi. Keep Pi's 
 
 Pi first finishes the provider request and classifies the assistant response. A transient result is annotated with a retryable provider marker, allowing Pi's own retry loop to remove the failed response and call `agent.continue()`. When the selected model is `pi-retry/auto`, its route receives the failed physical model and chooses the next configured, authenticated candidate. Successful tool follow-ups stay on the fallback until the next user turn.
 
+An explicit usage-limit response must include a structured `rate_limit_error` plus a usage-cap marker or reset timestamp. pi-retry preserves the original diagnostic, shows the reset time when available, and queues a hidden follow-up so the virtual route can switch before Pi's native retry backoff. A plain `429` remains a normal transient rate limit and keeps Pi's native retry behavior.
+
 When switching after a transient failure, pi-retry first scans the configured chain for candidates with the same model ID as the failed physical model, preserving their configured order. Only when no usable same-ID candidate remains does it scan different model IDs in chain order. Unavailable or unauthenticated candidates are skipped without consuming a fallback slot.
 
 A fallback entry's explicit `thinkingLevel` wins. Without one, pi-retry uses Pi's configured `defaultThinkingLevel` when present; if Pi has no configured default, it inherits the failed request's thinking level. Pi clamps the returned level to the selected model's capabilities. This level remains sticky for tool continuations on that fallback.
 
-No fallback is attempted for user cancellation, authentication or permission failures, malformed requests, context overflow, billing, or quota errors. If every fallback has failed, Pi's normal retry budget continues to govern whether the current model is retried again or the turn ends.
+No fallback is attempted for user cancellation, authentication or permission failures, malformed requests, context overflow, generic billing, or generic quota errors. Explicit structured usage-limit responses are the exception when `pi-retry/auto` has an authenticated fallback. If every fallback has failed, Pi's normal retry budget continues to govern whether the current model is retried again or the turn ends.
 
 The old `--retry-stall-timeout-ms` flag remains accepted as a deprecated no-op for command-line compatibility. `PI_RETRY_STALL_TIMEOUT_MS` is likewise ignored; use Pi's native `retry.provider.timeoutMs` instead.
 
@@ -133,6 +136,7 @@ The extension does not copy API keys, alter Pi authentication, or silently inven
 ## 🚧 Limitations
 
 - Fallback requires `pi-retry/auto` or `autoRoute: true`; loading the extension alone does not change the selected model.
+- Immediate usage-limit switching requires a physical fallback that is already authenticated and available in the current virtual route.
 - Fallback candidates must be physical chat models already known and authenticated by Pi. The extension does not register providers or create credentials.
 - The legacy `--retry-stall-timeout-ms` flag and `PI_RETRY_STALL_TIMEOUT_MS` environment variable are accepted/ignored for compatibility; they never trigger extension-owned aborts.
 - Live provider behavior, account entitlements, and model compatibility remain external dependencies. No claim of cross-provider prompt or tool equivalence is made.

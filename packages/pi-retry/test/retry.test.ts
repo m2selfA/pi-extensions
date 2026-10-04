@@ -8,6 +8,7 @@ import {
   decorateRetryableError,
   isPermanentProviderMessage,
   isTransientProviderMessage,
+  isUsageLimitProviderMessage,
   RETRYABLE_ERROR_TAG,
 } from "../src/classifier.js";
 import retry from "../src/retry.js";
@@ -25,6 +26,9 @@ import {
 afterEach(() => {
   vi.restoreAllMocks();
 });
+
+const NESTED_USAGE_LIMIT_ERROR =
+  '502: {"type":"translation_failed","message":"upstream returned 429: {"type":"error","error":{"type":"rate_limit_error","code":"1308","message":"[1308][已达到 5 小时的使用上限。您的限额将在 2026-10-04 14:21:01 重置。][202610041054085bb866fe59dd4882]"},"request_id":"202610041054085bb866fe5"}';
 
 describe("retry settings", () => {
   test("accepts provider/model references whose model id contains a slash", () => {
@@ -134,6 +138,30 @@ describe("provider failure classification", () => {
     ).toMatchObject({
       kind: "transient",
     });
+  });
+
+  test("classifies a nested usage limit and preserves its reset timestamp", () => {
+    expect(
+      classifyAssistantFailure({
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: NESTED_USAGE_LIMIT_ERROR,
+      }),
+    ).toMatchObject({
+      kind: "usage-limit",
+      resetAt: "2026-10-04 14:21:01",
+    });
+    expect(isUsageLimitProviderMessage(NESTED_USAGE_LIMIT_ERROR)).toBe(true);
+    expect(isTransientProviderMessage(NESTED_USAGE_LIMIT_ERROR)).toBe(false);
+  });
+
+  test("keeps ordinary and malformed 429 rate limits transient", () => {
+    const ordinary = "HTTP 429 rate limit exceeded; retry after 30 seconds";
+    const malformed = '502 upstream returned 429: {"type":"rate_limit_error","message":"try again later"}';
+    expect(isUsageLimitProviderMessage(ordinary)).toBe(false);
+    expect(isTransientProviderMessage(ordinary)).toBe(true);
+    expect(isUsageLimitProviderMessage(malformed)).toBe(false);
+    expect(isTransientProviderMessage(malformed)).toBe(true);
   });
 
   test("keeps permanent account and request failures out of retry", () => {
@@ -276,6 +304,43 @@ describe("fallback routing", () => {
     );
     expect(modelReferenceForTest(exhausted.model)).toBe("anthropic/backup");
     expect(notices).toHaveLength(2);
+  });
+
+  test("routes an ordinary 429 through the native retry route", () => {
+    const sessionManager = {};
+    const primary = model("openai", "primary");
+    const fallback = model("anthropic", "fallback");
+    const models = [primary, fallback];
+    const ctx = {
+      sessionManager,
+      modelRegistry: {
+        find(provider: string, id: string) {
+          return models.find((candidate) => candidate.provider === provider && candidate.id === id);
+        },
+        getAvailable() {
+          return models;
+        },
+      },
+    } as unknown as ExtensionContext;
+    const route = createRetryRoute(
+      () => ({ enabled: true, autoRoute: true, fallbackModels: [{ model: "anthropic/fallback" }] }),
+      new WeakMap(),
+    );
+    const result = route(
+      {
+        model: model(RETRY_VIRTUAL_PROVIDER, RETRY_VIRTUAL_MODEL, "pi-virtual"),
+        reason: "retry",
+        thinkingLevel: "medium",
+        messages: [],
+        state: { primary: "openai/primary", active: "openai/primary", tried: ["openai/primary"] },
+        failed: {
+          model: primary,
+          message: { role: "assistant", stopReason: "error", errorMessage: "HTTP 429 rate limit exceeded" },
+        },
+      } as never,
+      ctx,
+    );
+    expect(modelReferenceForTest(result.model)).toBe("anthropic/fallback");
   });
 
   test("prefers same-name fallbacks before other names and uses Pi default thinking", () => {
@@ -573,25 +638,78 @@ describe("fallback routing", () => {
     );
     expect(modelReferenceForTest(result.model)).toBe("openai/primary");
   });
+  test("switches immediately for a pending usage-limit continuation", () => {
+    const sessionManager = {};
+    const primary = model("openai", "primary");
+    const fallback = model("anthropic", "fallback");
+    const models = [primary, fallback];
+    const ctx = {
+      sessionManager,
+      modelRegistry: {
+        find(provider: string, id: string) {
+          return models.find((candidate) => candidate.provider === provider && candidate.id === id);
+        },
+        getAvailable() {
+          return models;
+        },
+      },
+    } as unknown as ExtensionContext;
+    const pending = new WeakMap<object, { failedModel: string; reason: string; resetAt?: string }>();
+    pending.set(sessionManager, {
+      failedModel: "openai/primary",
+      reason: "the provider usage limit was reached and resets at 2026-10-04 14:21:01",
+      resetAt: "2026-10-04 14:21:01",
+    });
+    const notices: string[] = [];
+    const route = createRetryRoute(
+      () => ({ enabled: true, autoRoute: true, fallbackModels: [{ model: "anthropic/fallback" }] }),
+      new WeakMap(),
+      (_ctx, from, to, reason) => notices.push(`${from}->${to}:${reason}`),
+      undefined,
+      pending,
+    );
+    const result = route(
+      {
+        model: model(RETRY_VIRTUAL_PROVIDER, RETRY_VIRTUAL_MODEL, "pi-virtual"),
+        reason: "continuation",
+        thinkingLevel: "medium",
+        messages: [],
+        state: { primary: "openai/primary", active: "openai/primary", tried: ["openai/primary"] },
+      } as never,
+      ctx,
+    );
+    expect(modelReferenceForTest(result.model)).toBe("anthropic/fallback");
+    expect(notices).toEqual([
+      "openai/primary->anthropic/fallback:the provider usage limit was reached and resets at 2026-10-04 14:21:01",
+    ]);
+  });
 });
 
 describe("extension lifecycle", () => {
-  function setup(options: { signal?: AbortSignal } = {}) {
+  function setup(options: { signal?: AbortSignal; immediate?: boolean } = {}) {
     type Handler = (...args: unknown[]) => unknown;
     const handlers = new Map<string, Handler[]>();
+    const primary = { provider: "openai", id: "primary", api: "openai-completions" };
+    const fallback = { provider: "anthropic", id: "fallback", api: "anthropic-messages" };
+    const virtual = { provider: RETRY_VIRTUAL_PROVIDER, id: RETRY_VIRTUAL_MODEL, api: "pi-virtual" };
+    const models = [primary, fallback];
+    const sendMessage = vi.fn();
     const pi = {
       registerFlag(_name: string, _config: unknown) {},
       registerVirtualModel(_definition: unknown) {},
       on(name: string, handler: Handler) {
         handlers.set(name, [...(handlers.get(name) ?? []), handler]);
       },
+      sendMessage,
       setModel: async () => true,
     } as unknown as ExtensionAPI;
     retry(pi, {
       readSettings: () => ({
         kind: "missing",
         path: "",
-        settings: { enabled: true, autoRoute: false, fallbackModels: [] },
+        settings: options.immediate
+          ? { enabled: true, autoRoute: true, fallbackModels: [{ model: "anthropic/fallback" }] }
+          : { enabled: true, autoRoute: false, fallbackModels: [] },
         errors: [],
       }),
       readRetryPolicy: () => ({ enabled: true, errors: [] }),
@@ -600,6 +718,15 @@ describe("extension lifecycle", () => {
       hasUI: true,
       mode: "tui",
       signal: options.signal,
+      model: options.immediate ? virtual : undefined,
+      modelRegistry: {
+        find(provider: string, id: string) {
+          return models.find((candidate) => candidate.provider === provider && candidate.id === id);
+        },
+        getAvailable() {
+          return models;
+        },
+      },
       ui: {
         setStatus: vi.fn(),
         notify: vi.fn(),
@@ -607,7 +734,7 @@ describe("extension lifecycle", () => {
       abort: vi.fn(),
       sessionManager: {},
     } as unknown as ExtensionContext;
-    return { handlers, ctx };
+    return { handlers, ctx, sendMessage };
   }
 
   test("normalizes provider errors into Pi retryable errors", () => {
@@ -620,6 +747,60 @@ describe("extension lifecycle", () => {
     ) as { message: { stopReason: string; errorMessage: string } } | undefined;
     expect(result?.message.stopReason).toBe("error");
     expect(result?.message.errorMessage).toContain(RETRYABLE_ERROR_TAG);
+  });
+
+  test("notifies and queues an immediate fallback for a nested usage limit", () => {
+    const { handlers, ctx, sendMessage } = setup({ immediate: true });
+    handlers.get("before_provider_request")?.[0]?.({}, ctx);
+    const handler = handlers.get("message_end")?.[0];
+    const result = handler?.(
+      {
+        message: {
+          role: "assistant",
+          provider: "openai",
+          model: "primary",
+          stopReason: "error",
+          errorMessage: NESTED_USAGE_LIMIT_ERROR,
+        },
+      },
+      ctx,
+    ) as { message: { stopReason: string; errorMessage: string } } | undefined;
+
+    expect(result?.message.stopReason).toBe("stop");
+    expect(result?.message.errorMessage).toContain("quota exceeded");
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        customType: "pi-retry-usage-limit-recovery",
+        content: expect.stringContaining("fallback model"),
+        display: false,
+      }),
+      { deliverAs: "followUp" },
+    );
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("reset at 2026-10-04 14:21:01"), "warning");
+  });
+
+  test("terminates a usage limit without a configured fallback", () => {
+    const { handlers, ctx, sendMessage } = setup();
+    handlers.get("before_provider_request")?.[0]?.({}, ctx);
+    const handler = handlers.get("message_end")?.[0];
+    const result = handler?.(
+      {
+        message: {
+          role: "assistant",
+          provider: "openai",
+          model: "primary",
+          stopReason: "error",
+          errorMessage: NESTED_USAGE_LIMIT_ERROR,
+        },
+      },
+      ctx,
+    ) as { message: { stopReason: string; errorMessage: string } } | undefined;
+
+    expect(result?.message.stopReason).toBe("error");
+    expect(result?.message.errorMessage).toContain("quota exceeded");
+    expect(result?.message.errorMessage).toContain("1308");
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("no authenticated fallback"), "warning");
   });
 
   test("leaves permanent provider errors untouched so the original error is preserved", () => {

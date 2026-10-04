@@ -8,9 +8,16 @@ import {
   type AssistantFailure,
   classifyAssistantFailure,
   decorateRetryableError,
+  decorateUsageLimitError,
   retryableErrorMarkerPresent,
 } from "./classifier.js";
-import { modelReference, registerRetryVirtualModel } from "./router.js";
+import {
+  hasAvailableFallback,
+  modelReference,
+  type RetryLimitRecovery,
+  type RetryRouteState,
+  registerRetryVirtualModel,
+} from "./router.js";
 import {
   loadRetrySettings,
   RETRY_VIRTUAL_MODEL,
@@ -32,11 +39,16 @@ export type RetryOptions = {
 
 type MessageShape = AssistantFailure & {
   [key: string]: unknown;
+  model?: unknown;
+  provider?: unknown;
 };
 
 const STATUS_KEY = "retry";
 const RETRY_STATUS = "retrying";
 const STALL_TIMEOUT_FLAG = "retry-stall-timeout-ms";
+const LIMIT_RECOVERY_MESSAGE_TYPE = "pi-retry-usage-limit-recovery";
+const LIMIT_RECOVERY_MESSAGE =
+  "The previous provider request reached its usage limit. Continue the pending response using the fallback model.";
 
 export function readPiRetryPolicy(ctx: RetrySettingsContext, agentDir = getAgentDir()): RetryPolicy {
   try {
@@ -52,6 +64,8 @@ export function readPiRetryPolicy(ctx: RetrySettingsContext, agentDir = getAgent
 
 export default function retry(pi: ExtensionAPI, options: RetryOptions = {}): void {
   const autoPrimaries = new WeakMap<object, string>();
+  const pendingLimitRecoveries = new WeakMap<object, RetryLimitRecovery>();
+  const routeStates = new WeakMap<object, RetryRouteState>();
   let settingsState: RetrySettingsState = {
     kind: "missing",
     path: "",
@@ -107,13 +121,22 @@ export default function retry(pi: ExtensionAPI, options: RetryOptions = {}): voi
     type: "string",
   });
 
-  registerRetryVirtualModel(pi, effectiveSettings, autoPrimaries, (ctx, from, to, reason) => {
-    if (!ctx.hasUI) return;
-    ctx.ui.setStatus(STATUS_KEY, RETRY_STATUS);
-    ctx.ui.notify(`pi-retry switched from ${from} to fallback ${to}: ${reason}.`, "warning");
-  });
+  registerRetryVirtualModel(
+    pi,
+    effectiveSettings,
+    autoPrimaries,
+    (ctx, from, to, reason) => {
+      if (!ctx.hasUI) return;
+      ctx.ui.setStatus(STATUS_KEY, RETRY_STATUS);
+      ctx.ui.notify(`pi-retry switched from ${from} to fallback ${to}: ${reason}.`, "warning");
+    },
+    pendingLimitRecoveries,
+    routeStates,
+  );
 
   pi.on("session_start", async (_event, ctx) => {
+    pendingLimitRecoveries.delete(ctx.sessionManager);
+    routeStates.delete(ctx.sessionManager);
     refresh(ctx);
     if (
       !effectiveSettings().enabled ||
@@ -157,12 +180,57 @@ export default function retry(pi: ExtensionAPI, options: RetryOptions = {}): voi
     if (message.role !== "assistant" || !effectiveSettings().enabled) return;
 
     const classification = classifyAssistantFailure(message, ctx.signal?.aborted ?? false);
-    if (classification.kind !== "transient") return;
-
     const originalErrorMessage =
       typeof message.errorMessage === "string" && message.errorMessage.length > 0
         ? message.errorMessage
         : "The provider returned a transient failure without details.";
+
+    if (classification.kind === "usage-limit") {
+      const failedModel = messageModelReference(message);
+      const routeState = routeStates.get(ctx.sessionManager);
+      const canSwitchImmediately =
+        isRetryVirtualModel(ctx) &&
+        failedModel !== undefined &&
+        hasAvailableFallback(ctx, effectiveSettings(), failedModel, routeState?.tried ?? [failedModel]);
+
+      if (canSwitchImmediately && failedModel) {
+        pendingLimitRecoveries.set(ctx.sessionManager, {
+          failedModel,
+          reason: classification.reason,
+          resetAt: classification.resetAt,
+        });
+        pi.sendMessage(
+          {
+            customType: LIMIT_RECOVERY_MESSAGE_TYPE,
+            content: LIMIT_RECOVERY_MESSAGE,
+            display: false,
+            details: { resetAt: classification.resetAt },
+          },
+          { deliverAs: "followUp" },
+        );
+      }
+
+      if (ctx.hasUI) {
+        ctx.ui.setStatus(STATUS_KEY, RETRY_STATUS);
+        ctx.ui.notify(
+          `pi-retry detected a provider usage limit${
+            classification.resetAt ? `; reset at ${classification.resetAt}` : ""
+          }; ${canSwitchImmediately ? "switching immediately" : "no authenticated fallback is available"}.`,
+          "warning",
+        );
+      }
+
+      return {
+        message: {
+          ...message,
+          // Pi's low-level loop only consumes follow-ups before agent_end for non-error stops.
+          stopReason: canSwitchImmediately ? "stop" : "error",
+          errorMessage: decorateUsageLimitError(originalErrorMessage, classification.reason),
+        } as typeof event.message,
+      };
+    }
+
+    if (classification.kind !== "transient") return;
     if (retryableErrorMarkerPresent(originalErrorMessage) && message.stopReason === "error") return;
 
     if (ctx.hasUI) {
@@ -184,6 +252,18 @@ export default function retry(pi: ExtensionAPI, options: RetryOptions = {}): voi
 
   pi.on("session_shutdown", (_event, ctx) => {
     autoPrimaries.delete(ctx.sessionManager);
+    pendingLimitRecoveries.delete(ctx.sessionManager);
+    routeStates.delete(ctx.sessionManager);
     if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
   });
+}
+
+function isRetryVirtualModel(ctx: ExtensionContext): boolean {
+  return ctx.model?.provider === RETRY_VIRTUAL_PROVIDER && ctx.model.id === RETRY_VIRTUAL_MODEL;
+}
+
+function messageModelReference(message: MessageShape): string | undefined {
+  return typeof message.provider === "string" && typeof message.model === "string"
+    ? `${message.provider}/${message.model}`
+    : undefined;
 }
