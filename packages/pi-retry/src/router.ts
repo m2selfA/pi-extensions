@@ -220,9 +220,11 @@ function resolvePhysicalModel(
   if (separator <= 0) return undefined;
   const model = ctx.modelRegistry.find(reference.slice(0, separator), reference.slice(separator + 1));
   if (!model || model.api === "pi-virtual") return undefined;
-  return ctx.modelRegistry.getAvailable().some((candidate) => modelReference(candidate) === reference)
-    ? model
-    : undefined;
+  // getAvailable() is a startup/auth snapshot and can lag a provider refresh. Pi's own virtual
+  // resolver uses configured-auth as the final gate, so accept the same state here when the model
+  // is registered but temporarily absent from that snapshot.
+  if (ctx.modelRegistry.getAvailable().some((candidate) => modelReference(candidate) === reference)) return model;
+  return ctx.modelRegistry.hasConfiguredAuth?.(model) ? model : undefined;
 }
 
 function findNextFallback(

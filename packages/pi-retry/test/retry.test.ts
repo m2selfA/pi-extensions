@@ -558,6 +558,46 @@ describe("fallback routing", () => {
     expect(modelReferenceForTest(result.model)).toBe("anthropic/usable");
   });
 
+  test("accepts a configured-auth fallback when the availability snapshot is stale", () => {
+    const sessionManager = {};
+    const primary = model("openai", "primary");
+    const fallback = model("anthropic", "fallback");
+    const models = [primary, fallback];
+    const ctx = {
+      sessionManager,
+      modelRegistry: {
+        find(provider: string, id: string) {
+          return models.find((candidate) => candidate.provider === provider && candidate.id === id);
+        },
+        getAvailable() {
+          return [primary];
+        },
+        hasConfiguredAuth(candidate: { provider: string; id: string }) {
+          return candidate.provider === "anthropic";
+        },
+      },
+    } as unknown as ExtensionContext;
+    const route = createRetryRoute(
+      () => ({ enabled: true, autoRoute: true, fallbackModels: [{ model: "anthropic/fallback" }] }),
+      new WeakMap(),
+    );
+    const result = route(
+      {
+        model: model(RETRY_VIRTUAL_PROVIDER, RETRY_VIRTUAL_MODEL, "pi-virtual"),
+        reason: "retry",
+        thinkingLevel: "medium",
+        messages: [],
+        state: { primary: "openai/primary", active: "openai/primary", tried: ["openai/primary"] },
+        failed: {
+          model: primary,
+          message: { role: "assistant", stopReason: "error", errorMessage: "HTTP 503 Service Unavailable" },
+        },
+      } as never,
+      ctx,
+    );
+    expect(modelReferenceForTest(result.model)).toBe("anthropic/fallback");
+  });
+
   test("does not switch when Pi retry is disabled", () => {
     const sessionManager = {};
     const primary = model("openai", "primary");
@@ -686,7 +726,7 @@ describe("fallback routing", () => {
 });
 
 describe("extension lifecycle", () => {
-  function setup(options: { signal?: AbortSignal; immediate?: boolean } = {}) {
+  function setup(options: { signal?: AbortSignal; immediate?: boolean; staleAvailability?: boolean } = {}) {
     type Handler = (...args: unknown[]) => unknown;
     const handlers = new Map<string, Handler[]>();
     const primary = { provider: "openai", id: "primary", api: "openai-completions" };
@@ -724,7 +764,10 @@ describe("extension lifecycle", () => {
           return models.find((candidate) => candidate.provider === provider && candidate.id === id);
         },
         getAvailable() {
-          return models;
+          return options.staleAvailability ? [primary] : models;
+        },
+        hasConfiguredAuth(candidate: { provider: string; id: string }) {
+          return models.some((model) => model.provider === candidate.provider && model.id === candidate.id);
         },
       },
       ui: {
@@ -750,7 +793,7 @@ describe("extension lifecycle", () => {
   });
 
   test("notifies and queues an immediate fallback for a nested usage limit", () => {
-    const { handlers, ctx, sendMessage } = setup({ immediate: true });
+    const { handlers, ctx, sendMessage } = setup({ immediate: true, staleAvailability: true });
     handlers.get("before_provider_request")?.[0]?.({}, ctx);
     const handler = handlers.get("message_end")?.[0];
     const result = handler?.(
@@ -777,6 +820,8 @@ describe("extension lifecycle", () => {
       { deliverAs: "followUp" },
     );
     expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("reset at 2026-10-04 14:21:01"), "warning");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("switching immediately"), "warning");
+    expect(ctx.ui.notify).not.toHaveBeenCalledWith(expect.stringContaining("no authenticated fallback"), "warning");
   });
 
   test("terminates a usage limit without a configured fallback", () => {
