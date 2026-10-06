@@ -44,7 +44,6 @@
       "./packages/pi-typesafe/src/index.ts",
       "./packages/pi-typesafe-compact/src/index.ts",
       "./packages/pi-usage/src/index.ts",
-      "./packages/pi-wispterm-status/src/index.ts",
       "./packages/pi-worktree/src/index.ts"
     ],
     "skills": [
